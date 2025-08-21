@@ -1,0 +1,12 @@
+streamlit>=1.28.0
+pandas>=1.5.0
+numpy>=1.24.0
+psycopg2-binary>=2.9.0
+transformers>=4.30.0
+torch>=2.0.0
+fuzzywuzzy>=0.18.0
+python-levenshtein>=0.21.0
+PyPDF2>=3.0.0
+python-docx>=0.8.11
+sqlalchemy>=1.4.0
+python-dotenv>=1.0.0
