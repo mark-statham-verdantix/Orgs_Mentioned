@@ -24,6 +24,10 @@ from collections import defaultdict, Counter
 import warnings
 warnings.filterwarnings('ignore')
 
+# Fix torch compatibility issue with Streamlit
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 # Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
@@ -351,19 +355,31 @@ def main():
     st.title("Organization Extraction & Database Management")
     st.markdown("Upload documents to automatically extract and categorize organizations")
     
-    # Configuration from environment variables
+    # Configuration from Streamlit secrets (fallback to environment variables)
     postgres_config = {
-        'host': os.getenv('POSTGRES_HOST', 'localhost'),
-        'port': os.getenv('POSTGRES_PORT', '5432'),
-        'database': os.getenv('POSTGRES_DATABASE', 'postgres'),
-        'user': os.getenv('POSTGRES_USER', 'postgres'),
-        'password': os.getenv('POSTGRES_PASSWORD', '')
+        'host': st.secrets.get("database", {}).get("POSTGRES_HOST", os.getenv('POSTGRES_HOST', 'localhost')),
+        'port': st.secrets.get("database", {}).get("POSTGRES_PORT", os.getenv('POSTGRES_PORT', '5432')),
+        'database': st.secrets.get("database", {}).get("POSTGRES_DATABASE", os.getenv('POSTGRES_DATABASE', 'postgres')),
+        'user': st.secrets.get("database", {}).get("POSTGRES_USER", os.getenv('POSTGRES_USER', 'postgres')),
+        'password': st.secrets.get("database", {}).get("POSTGRES_PASSWORD", os.getenv('POSTGRES_PASSWORD', ''))
     }
     
     # Validate configuration
     if not all([postgres_config['host'], postgres_config['user'], postgres_config['password']]):
-        st.error("⚠️ **Database configuration missing!** Please check your .env file.")
-        st.info("Create a .env file with your database credentials. See .env.example for the template.")
+        st.error("⚠️ **Database configuration missing!** Please configure database credentials.")
+        st.info("""
+        **Local Development**: Create a .env file with your database credentials
+        
+        **Streamlit Community**: Add secrets in your app settings:
+        ```
+        [database]
+        POSTGRES_HOST = "your-host"
+        POSTGRES_PORT = "5432"
+        POSTGRES_DATABASE = "your-database"
+        POSTGRES_USER = "your-user"  
+        POSTGRES_PASSWORD = "your-password"
+        ```
+        """)
         st.stop()
     
     # Initialize extractor
@@ -415,11 +431,27 @@ def main():
             with st.expander("Document Preview"):
                 st.text_area("Text Content", text[:1000] + "..." if len(text) > 1000 else text, height=200)
             
-            # Extract organizations
-            with st.spinner("Extracting organizations..."):
-                start_time = time.time()
-                db_matches, ner_discoveries = extractor.extract_organizations(text)
-                processing_time = time.time() - start_time
+            # Extract organizations (cache results to avoid re-extraction)
+            cache_key = f"extraction_{uploaded_file.name}_{len(text)}"
+            
+            if cache_key not in st.session_state:
+                with st.spinner("Extracting organizations..."):
+                    start_time = time.time()
+                    db_matches, ner_discoveries = extractor.extract_organizations(text)
+                    processing_time = time.time() - start_time
+                    
+                    # Cache the results
+                    st.session_state[cache_key] = {
+                        'db_matches': db_matches,
+                        'ner_discoveries': ner_discoveries,
+                        'processing_time': processing_time
+                    }
+            else:
+                # Use cached results
+                cached_results = st.session_state[cache_key]
+                db_matches = cached_results['db_matches']
+                ner_discoveries = cached_results['ner_discoveries'] 
+                processing_time = cached_results['processing_time']
             
             # Results summary
             col1, col2, col3 = st.columns(3)
@@ -458,25 +490,69 @@ def main():
                 if ner_discoveries:
                     st.warning(f"Found {len(ner_discoveries)} potential new organizations that need manual review")
                     
+                    # Initialize session state for approved/rejected organizations
+                    if 'approved_orgs' not in st.session_state:
+                        st.session_state.approved_orgs = []
+                    if 'rejected_orgs' not in st.session_state:
+                        st.session_state.rejected_orgs = []
+                    
                     for i, discovery in enumerate(ner_discoveries):
+                        org_text = discovery['text']
+                        
+                        # Skip if already approved or rejected
+                        if org_text in st.session_state.approved_orgs or org_text in st.session_state.rejected_orgs:
+                            continue
+                            
                         with st.container():
                             col1, col2, col3 = st.columns([3, 1, 1])
                             
                             with col1:
-                                st.write(f"**{discovery['text']}** (confidence: {discovery['confidence']:.2f})")
+                                st.write(f"**{org_text}** (confidence: {discovery['confidence']:.2f})")
                             
                             with col2:
-                                approve = st.button(f"Approve", key=f"approve_{i}")
+                                if st.button(f"Approve", key=f"approve_{i}"):
+                                    st.session_state.approved_orgs.append(org_text)
+                                    st.rerun()
                             
                             with col3:
-                                reject = st.button(f"Reject", key=f"reject_{i}")
+                                if st.button(f"Reject", key=f"reject_{i}"):
+                                    st.session_state.rejected_orgs.append(org_text)
+                                    st.rerun()
+                    
+                    # Display approved organizations
+                    if st.session_state.approved_orgs:
+                        st.success(f"✅ **Approved Organizations ({len(st.session_state.approved_orgs)}):**")
+                        for approved_org in st.session_state.approved_orgs:
+                            st.write(f"• {approved_org}")
+                    
+                    # Display rejected organizations  
+                    if st.session_state.rejected_orgs:
+                        st.error(f"❌ **Rejected Organizations ({len(st.session_state.rejected_orgs)}):**")
+                        for rejected_org in st.session_state.rejected_orgs:
+                            st.write(f"• {rejected_org}")
                             
-                            if approve:
-                                st.success(f"✅ Approved: {discovery['text']}")
-                                # Here you would add to pending database additions
-                            
-                            if reject:
-                                st.error(f"❌ Rejected: {discovery['text']}")
+                    # Clear buttons
+                    if st.session_state.approved_orgs or st.session_state.rejected_orgs:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.button("🔄 Reset Approvals"):
+                                st.session_state.approved_orgs = []
+                                st.session_state.rejected_orgs = []
+                                st.rerun()
+                        with col2:
+                            if st.button("📋 Add to Extracted List"):
+                                # Add approved orgs to db_matches for export
+                                for approved_org in st.session_state.approved_orgs:
+                                    db_matches.append({
+                                        'text': approved_org,
+                                        'canonical': approved_org,
+                                        'confidence': 0.95,
+                                        'org_id': None,
+                                        'method': 'manual_approval'
+                                    })
+                                st.success(f"Added {len(st.session_state.approved_orgs)} organizations to extracted list!")
+                                st.session_state.approved_orgs = []
+                                st.rerun()
                 else:
                     st.info("No new organizations discovered")
                 
