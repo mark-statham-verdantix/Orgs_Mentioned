@@ -36,6 +36,8 @@ load_dotenv()
 import PyPDF2
 import docx
 from io import BytesIO
+import openpyxl
+from pptx import Presentation
 
 class OrganizationExtractor:
     """Core organization extraction system for Streamlit app"""
@@ -108,6 +110,7 @@ class OrganizationExtractor:
     def _build_lookup(self):
         """Build organization lookup dictionary"""
         self.org_lookup = {}
+        self.known_short_orgs = set()  # Build dynamically from database
         
         for _, org in self.master_orgs_df.iterrows():
             org_id = org['org_id']
@@ -120,6 +123,10 @@ class OrganizationExtractor:
                     'confidence': 1.0
                 }
                 
+                # Track short orgs from database
+                if len(org_name) < 8 and ' ' not in org_name:
+                    self.known_short_orgs.add(org_name.lower())
+                
                 # Add aliases
                 aliases = self._generate_aliases(org_name)
                 for alias in aliases:
@@ -129,6 +136,10 @@ class OrganizationExtractor:
                             'canonical': org_name,
                             'confidence': 0.85
                         }
+                        
+                        # Track short aliases too
+                        if len(alias) < 8 and ' ' not in alias:
+                            self.known_short_orgs.add(alias.lower())
     
     def _generate_aliases(self, org_name: str) -> List[str]:
         """Generate aliases for organization names"""
@@ -185,7 +196,14 @@ class OrganizationExtractor:
         
         org_indicators = [
             'company', 'corporation', 'inc', 'founded', 'ceo', 'announced',
-            'partnership', 'acquisition', 'investment', 'subsidiary'
+            'partnership', 'acquisition', 'investment', 'subsidiary', 'firm', 'firms',
+            'business', 'enterprise', 'organization', 'organisation', 'group', 'ltd',
+            'limited', 'consulting', 'consultancy', 'services', 'solutions', 'technologies',
+            'technology', 'corporate', 'management', 'strategic', 'operations', 'client',
+            'clients', 'market', 'industry', 'sector', 'expertise', 'capabilities',
+            'team', 'teams', 'office', 'offices', 'division', 'department', 'unit',
+            'board', 'executive', 'director', 'manager', 'leadership', 'staff',
+            'employee', 'employees', 'workforce', 'personnel', 'professional', 'specialist'
         ]
         
         return any(indicator in context for indicator in org_indicators)
@@ -205,11 +223,10 @@ class OrganizationExtractor:
             if (len(term) >= self.min_org_length and 
                 not self._is_generic_term(term)):
                 
-                # Require multi-word for short terms, but allow known brands
+                # Require multi-word for short terms, but allow known brands from database
                 if len(term) < 8 and ' ' not in term:
-                    # Allow well-known organization names even if short
-                    known_short_orgs = {'pfizer', 'nvidia', 'volvo', 'tesla', 'apple', 'google', 'meta', 'uber', 'cips'}
-                    if term.lower() not in known_short_orgs:
+                    # Use dynamically built list of short orgs from database
+                    if term.lower() not in self.known_short_orgs:
                         continue
                 
                 pattern = r'\b' + re.escape(term) + r'\b'
@@ -222,10 +239,7 @@ class OrganizationExtractor:
                         
                         org_info = self.org_lookup[term]
                         
-                        # Context validation for shorter terms
-                        if len(term) < 10:
-                            if not self._validate_context(text, start, end):
-                                continue
+                        # Context validation removed - trust database matches
                         
                         db_matches.append({
                             'text': text[start:end],
@@ -256,7 +270,7 @@ class OrganizationExtractor:
                             org_text = ' '.join(org_text.split())
                             
                             if (len(org_text) >= self.min_org_length and
-                                pred['score'] >= 0.8 and
+                                pred['score'] >= self.min_confidence and
                                 not self._is_generic_term(org_text)):
                                 
                                 # Check if already in database
@@ -332,6 +346,73 @@ def extract_text_from_file(uploaded_file) -> str:
             text = ""
             for paragraph in doc.paragraphs:
                 text += paragraph.text + "\n"
+            return text
+        
+        elif file_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            # Excel files (.xlsx)
+            workbook = openpyxl.load_workbook(BytesIO(uploaded_file.read()), data_only=True)
+            text = ""
+            
+            for sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                text += f"Sheet: {sheet_name}\n"
+                
+                for row in sheet.iter_rows():
+                    row_text = []
+                    for cell in row:
+                        if cell.value is not None:
+                            row_text.append(str(cell.value))
+                    if row_text:
+                        text += " | ".join(row_text) + "\n"
+                text += "\n"
+            
+            return text
+        
+        elif file_type == "application/vnd.ms-excel":
+            # Legacy Excel files (.xls) - handled by openpyxl as well
+            try:
+                workbook = openpyxl.load_workbook(BytesIO(uploaded_file.read()), data_only=True)
+                text = ""
+                
+                for sheet_name in workbook.sheetnames:
+                    sheet = workbook[sheet_name]
+                    text += f"Sheet: {sheet_name}\n"
+                    
+                    for row in sheet.iter_rows():
+                        row_text = []
+                        for cell in row:
+                            if cell.value is not None:
+                                row_text.append(str(cell.value))
+                        if row_text:
+                            text += " | ".join(row_text) + "\n"
+                    text += "\n"
+                
+                return text
+            except Exception as e:
+                st.error(f"Error reading legacy Excel file: {e}")
+                return ""
+        
+        elif file_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+            # PowerPoint files (.pptx)
+            prs = Presentation(BytesIO(uploaded_file.read()))
+            text = ""
+            
+            for i, slide in enumerate(prs.slides, 1):
+                text += f"Slide {i}:\n"
+                
+                # Extract text from all shapes in the slide
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        text += shape.text + "\n"
+                
+                # Extract text from slide notes
+                if slide.notes_slide and slide.notes_slide.notes_text_frame:
+                    notes_text = slide.notes_slide.notes_text_frame.text.strip()
+                    if notes_text:
+                        text += f"Notes: {notes_text}\n"
+                
+                text += "\n"
+            
             return text
         
         else:
@@ -429,54 +510,280 @@ def main():
     st.sidebar.metric("Lookup Entries", len(extractor.org_lookup))
     
     # File upload
-    uploaded_file = st.file_uploader(
-        "Upload Document",
-        type=['txt', 'pdf', 'docx'],
-        help="Supported formats: TXT, PDF, DOCX"
+    uploaded_files = st.file_uploader(
+        "Upload Documents",
+        type=['txt', 'pdf', 'docx', 'xlsx', 'xls', 'pptx'],
+        help="Supported formats: TXT, PDF, DOCX, XLSX, XLS, PPTX",
+        accept_multiple_files=True
     )
     
-    if uploaded_file is not None:
-        # Extract text
-        with st.spinner("Extracting text from document..."):
-            text = extract_text_from_file(uploaded_file)
+    # Clear cache button
+    if st.button("🗑️ Clear Cache", help="Clear cached results to force re-processing"):
+        # Clear extraction cache
+        keys_to_remove = [key for key in st.session_state.keys() if key.startswith('extraction_')]
+        for key in keys_to_remove:
+            del st.session_state[key]
+        # Clear approval states
+        st.session_state.approved_orgs = []
+        st.session_state.rejected_orgs = []
+        st.rerun()
+    
+    if uploaded_files:
+        # Process all uploaded files
+        all_file_results = {}
+        all_db_matches = []
+        all_ner_discoveries = []
+        total_processing_time = 0
+        total_characters = 0
         
-        if text:
-            st.success(f"Extracted {len(text):,} characters from {uploaded_file.name}")
-            
-            # Text preview
-            with st.expander("Document Preview"):
-                st.text_area("Text Content", text[:1000] + "..." if len(text) > 1000 else text, height=200)
-            
-            # Extract organizations (cache results to avoid re-extraction)
-            cache_key = f"extraction_{uploaded_file.name}_{len(text)}"
-            
-            if cache_key not in st.session_state:
-                with st.spinner("Extracting organizations..."):
-                    start_time = time.time()
-                    db_matches, ner_discoveries = extractor.extract_organizations(text)
-                    processing_time = time.time() - start_time
+        # Extract text and process each file
+        for uploaded_file in uploaded_files:
+            with st.spinner(f"Processing {uploaded_file.name}..."):
+                # Extract text
+                text = extract_text_from_file(uploaded_file)
+                
+                if text:
+                    total_characters += len(text)
                     
-                    # Cache the results
-                    st.session_state[cache_key] = {
+                    # Extract organizations (cache results to avoid re-extraction)
+                    # Use file content hash for more robust caching
+                    import hashlib
+                    text_hash = hashlib.md5(text.encode()).hexdigest()[:8]
+                    cache_key = f"extraction_{uploaded_file.name}_{len(text)}_{text_hash}"
+                    
+                    if cache_key not in st.session_state:
+                        start_time = time.time()
+                        db_matches, ner_discoveries = extractor.extract_organizations(text)
+                        processing_time = time.time() - start_time
+                        
+                        # Cache the results
+                        st.session_state[cache_key] = {
+                            'db_matches': db_matches,
+                            'ner_discoveries': ner_discoveries,
+                            'processing_time': processing_time
+                        }
+                    else:
+                        # Use cached results
+                        cached_results = st.session_state[cache_key]
+                        db_matches = cached_results['db_matches']
+                        ner_discoveries = cached_results['ner_discoveries'] 
+                        processing_time = cached_results['processing_time']
+                    
+                    # Store results for this file
+                    all_file_results[uploaded_file.name] = {
+                        'text': text,
                         'db_matches': db_matches,
                         'ner_discoveries': ner_discoveries,
-                        'processing_time': processing_time
+                        'processing_time': processing_time,
+                        'characters': len(text)
                     }
-            else:
-                # Use cached results
-                cached_results = st.session_state[cache_key]
-                db_matches = cached_results['db_matches']
-                ner_discoveries = cached_results['ner_discoveries'] 
-                processing_time = cached_results['processing_time']
+                    
+                    # Add to combined results
+                    all_db_matches.extend(db_matches)
+                    all_ner_discoveries.extend(ner_discoveries)
+                    total_processing_time += processing_time
+                else:
+                    st.error(f"Could not extract text from {uploaded_file.name}")
+        
+        if all_file_results:
+            # Summary section
+            st.success(f"Successfully processed {len(all_file_results)} files")
             
-            # Results summary
-            col1, col2, col3 = st.columns(3)
+            # Overall metrics
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Database Matches", len(db_matches))
+                st.metric("Files Processed", len(all_file_results))
             with col2:
-                st.metric("New Discoveries", len(ner_discoveries))
+                st.metric("Total Characters", f"{total_characters:,}")
             with col3:
-                st.metric("Processing Time", f"{processing_time:.2f}s")
+                st.metric("Total Processing Time", f"{total_processing_time:.2f}s")
+            with col4:
+                st.metric("Avg Time per File", f"{total_processing_time/len(all_file_results):.2f}s")
+            
+            # Deduplicate combined results
+            db_matches = extractor._deduplicate_matches(all_db_matches)
+            ner_discoveries = extractor._deduplicate_matches(all_ner_discoveries)
+            
+            # Combined results summary
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Combined Database Matches", len(db_matches))
+            with col2:
+                st.metric("Combined New Discoveries", len(ner_discoveries))
+            
+            # Debug section - only show in local development  
+            # Set DEBUG_MODE=false in Streamlit Community Cloud secrets to hide debug info
+            debug_mode = os.getenv('DEBUG_MODE', 'true').lower() == 'true'
+            
+            # Try to check secrets, but don't fail if no secrets file exists
+            try:
+                if 'DEBUG_MODE' in st.secrets:
+                    debug_mode = st.secrets.get('DEBUG_MODE', 'true').lower() == 'true'
+            except (FileNotFoundError, Exception):
+                # No secrets file or other error - use environment variable or default
+                pass
+            
+            if debug_mode:
+                with st.expander("🔍 Debug Info", expanded=False):
+                    st.subheader("Database Lookup Statistics")
+                    st.write(f"Total organizations in lookup: {len(extractor.org_lookup)}")
+                    st.write(f"Known short organizations from DB: {len(extractor.known_short_orgs)}")
+                    
+                    # Show a sample of lookup keys
+                    sample_keys = list(extractor.org_lookup.keys())[:10]
+                    st.write("Sample lookup keys:", sample_keys)
+                    
+                    # Show short orgs from database
+                    if len(extractor.known_short_orgs) > 0:
+                        short_orgs_sample = list(extractor.known_short_orgs)[:20]
+                        st.write(f"Sample short orgs from DB: {short_orgs_sample}")
+                        if len(extractor.known_short_orgs) > 20:
+                            st.write(f"... and {len(extractor.known_short_orgs) - 20} more")
+                    
+                    # Show text samples from each file
+                    st.subheader("Text Extraction Samples")
+                    for filename, file_data in all_file_results.items():
+                        with st.container():
+                            st.write(f"**{filename}**: {len(file_data['text']):,} characters")
+                            # Show first 500 chars to check extraction quality
+                            preview = file_data['text'][:500].replace('\n', ' ')
+                            st.text(f"Preview: {preview}...")
+                    
+                    # Manual org search
+                    st.subheader("Manual Organization Search")
+                    search_org = st.text_input("Search for specific org in extracted text:", key="debug_search")
+                    
+                    # Show all current matches for troubleshooting
+                    st.subheader("All Current Matches (Troubleshooting)")
+                    st.write("**Database Matches Found:**")
+                    for i, match in enumerate(db_matches):
+                        st.markdown(f"**DB Match {i+1}: {match['canonical']}**")
+                        with st.container():
+                            col1, col2 = st.columns([1, 2])
+                            with col1:
+                                st.json(match)
+                            with col2:
+                                # Show which file(s) this came from
+                                source_files = []
+                                for filename, file_data in all_file_results.items():
+                                    for file_match in file_data['db_matches']:
+                                        if file_match['canonical'] == match['canonical']:
+                                            source_files.append(filename)
+                                            # Show the actual text that was matched
+                                            st.write(f"**Matched text in {filename}:** '{file_match['text']}'")
+                                            
+                                            # Show surrounding context
+                                            file_text = file_data['text']
+                                            match_pos = file_text.lower().find(file_match['text'].lower())
+                                            if match_pos >= 0:
+                                                start = max(0, match_pos - 100)
+                                                end = min(len(file_text), match_pos + len(file_match['text']) + 100)
+                                                context = file_text[start:end]
+                                                highlighted = context.replace(file_match['text'], f"**{file_match['text']}**")
+                                                st.write(f"**Context:** ...{highlighted}...")
+                                            else:
+                                                st.error("❌ Could not find this text in the file!")
+                                
+                                st.write(f"**Source files:** {list(set(source_files))}")
+                        st.markdown("---")
+                    
+                    if ner_discoveries:
+                        st.write("**NER Discoveries Found:**")
+                        for i, discovery in enumerate(ner_discoveries):
+                            st.markdown(f"**NER Discovery {i+1}: {discovery['text']}**")
+                            st.json(discovery)
+                            st.markdown("---")
+                    if search_org:
+                        for filename, file_data in all_file_results.items():
+                            text_lower = file_data['text'].lower()
+                            search_lower = search_org.lower()
+                            
+                            # Check if it appears in text
+                            if search_lower in text_lower:
+                                st.success(f"✅ '{search_org}' found in {filename}")
+                                
+                                # Check if it's in lookup
+                                if search_lower in extractor.org_lookup:
+                                    st.info(f"✅ '{search_org}' exists in database lookup")
+                                    
+                                    # Test the actual regex matching logic
+                                    import re
+                                    pattern = r'\b' + re.escape(search_lower) + r'\b'
+                                    matches = list(re.finditer(pattern, text_lower))
+                                    
+                                    if matches:
+                                        st.success(f"✅ Regex pattern matches {len(matches)} time(s)")
+                                        
+                                        # Check if it would pass other filters
+                                        org_info = extractor.org_lookup[search_lower]
+                                        st.write(f"Organization info: {org_info}")
+                                        
+                                        # Check length filter
+                                        if len(search_lower) >= extractor.min_org_length:
+                                            st.success(f"✅ Passes length filter (≥{extractor.min_org_length})")
+                                        else:
+                                            st.error(f"❌ FAILS length filter (<{extractor.min_org_length})")
+                                        
+                                        # Check generic term filter
+                                        if extractor._is_generic_term(search_lower):
+                                            st.error(f"❌ FAILS generic term filter")
+                                        else:
+                                            st.success(f"✅ Passes generic term filter")
+                                        
+                                        # Check short term rules
+                                        if len(search_lower) < 8 and ' ' not in search_lower:
+                                            if search_lower not in extractor.known_short_orgs:
+                                                st.error(f"❌ FAILS short term filter (not in known_short_orgs)")
+                                            else:
+                                                st.success(f"✅ Passes short term filter (in known_short_orgs)")
+                                        else:
+                                            st.success(f"✅ Passes short term filter (long enough or multi-word)")
+                                            
+                                    else:
+                                        st.error(f"❌ Regex pattern '{pattern}' does NOT match")
+                                        # Show context around the term
+                                        import re
+                                        simple_matches = [m.start() for m in re.finditer(re.escape(search_lower), text_lower)]
+                                        if simple_matches:
+                                            st.write("Found at positions:", simple_matches[:5])
+                                            for pos in simple_matches[:3]:
+                                                start = max(0, pos - 50)
+                                                end = min(len(text_lower), pos + len(search_lower) + 50)
+                                                context = text_lower[start:end]
+                                                highlighted = context.replace(search_lower, f"**{search_lower}**")
+                                                st.write(f"Context: ...{highlighted}...")
+                                    
+                                else:
+                                    st.warning(f"⚠️ '{search_org}' NOT in database lookup")
+                                    
+                                    # Try fuzzy search in lookup
+                                    from fuzzywuzzy import process
+                                    if len(extractor.org_lookup) > 0:
+                                        matches = process.extract(search_org, extractor.org_lookup.keys(), limit=3)
+                                        st.write(f"Closest matches in lookup: {matches}")
+                            else:
+                                st.error(f"❌ '{search_org}' NOT found in {filename}")
+            
+            # File-by-file breakdown
+            with st.expander("📁 File-by-File Breakdown", expanded=False):
+                for filename, file_data in all_file_results.items():
+                    st.subheader(f"📄 {filename}")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Characters", f"{file_data['characters']:,}")
+                    with col2:
+                        st.metric("DB Matches", len(file_data['db_matches']))
+                    with col3:
+                        st.metric("New Discoveries", len(file_data['ner_discoveries']))
+                    with col4:
+                        st.metric("Processing Time", f"{file_data['processing_time']:.2f}s")
+                    
+                    # File content preview
+                    preview_text = file_data['text'][:500] + "..." if len(file_data['text']) > 500 else file_data['text']
+                    st.text_area("Content Preview", preview_text, height=100, key=f"preview_{filename}")
+                    
+                    st.markdown("---")
             
             # Display results
             if db_matches or ner_discoveries:
@@ -590,15 +897,29 @@ def main():
                             # Here you would add to pending database additions
                 
                 # Export Results
-                st.subheader("📥 Export Results")
+                st.subheader("📥 Export Combined Results")
                 
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
                     if db_matches:
-                        csv_data = pd.DataFrame(db_matches).to_csv(index=False)
+                        # Add source file information to CSV export
+                        enriched_db_matches = []
+                        for match in db_matches:
+                            # Find which file(s) this match came from
+                            source_files = []
+                            for filename, file_data in all_file_results.items():
+                                for file_match in file_data['db_matches']:
+                                    if file_match['canonical'] == match['canonical']:
+                                        source_files.append(filename)
+                            
+                            match_with_source = match.copy()
+                            match_with_source['source_files'] = '; '.join(set(source_files))
+                            enriched_db_matches.append(match_with_source)
+                        
+                        csv_data = pd.DataFrame(enriched_db_matches).to_csv(index=False)
                         st.download_button(
-                            label="📊 Download CSV (Database Matches)",
+                            label="📊 CSV (DB Matches)",
                             data=csv_data,
                             file_name=f"db_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                             mime="text/csv"
@@ -606,37 +927,103 @@ def main():
                 
                 with col2:
                     if ner_discoveries:
-                        csv_data = pd.DataFrame(ner_discoveries).to_csv(index=False)
+                        # Add source file information to NER discoveries
+                        enriched_ner_discoveries = []
+                        for discovery in ner_discoveries:
+                            # Find which file(s) this discovery came from
+                            source_files = []
+                            for filename, file_data in all_file_results.items():
+                                for file_discovery in file_data['ner_discoveries']:
+                                    if file_discovery['text'] == discovery['text']:
+                                        source_files.append(filename)
+                            
+                            discovery_with_source = discovery.copy()
+                            discovery_with_source['source_files'] = '; '.join(set(source_files))
+                            enriched_ner_discoveries.append(discovery_with_source)
+                        
+                        csv_data = pd.DataFrame(enriched_ner_discoveries).to_csv(index=False)
                         st.download_button(
-                            label="🔍 Download CSV (New Discoveries)",
+                            label="🔍 CSV (New Orgs)",
                             data=csv_data,
                             file_name=f"new_orgs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                             mime="text/csv"
                         )
                 
                 with col3:
-                    if db_matches or ner_discoveries:
-                        # Create combined organization list for .txt export
+                    if db_matches or (st.session_state.get('approved_orgs', [])):
+                        # Create combined organization list for .txt export (DB matches + approved orgs only)
                         all_orgs = []
                         
                         # Add database matches
                         for match in db_matches:
                             all_orgs.append(match['canonical'])
                         
-                        # Add new discoveries
-                        for discovery in ner_discoveries:
-                            all_orgs.append(discovery['text'])
+                        # Add approved organizations from review process
+                        if 'approved_orgs' in st.session_state:
+                            all_orgs.extend(st.session_state.approved_orgs)
                         
                         # Remove duplicates and sort
                         unique_orgs = sorted(list(set(all_orgs)))
                         
-                        # Create comma-separated string
-                        txt_content = ", ".join(unique_orgs)
+                        # Show what will be exported
+                        st.write(f"**Export will include:** {len([m['canonical'] for m in db_matches])} DB matches + {len(st.session_state.get('approved_orgs', []))} approved orgs = {len(unique_orgs)} total")
+                        
+                        # Separator selection
+                        separator = st.radio(
+                            "Choose separator:",
+                            options=[", ", "; "],
+                            format_func=lambda x: "Comma" if x == ", " else "Semicolon",
+                            horizontal=True,
+                            key="separator_choice"
+                        )
+                        
+                        # Create separated string
+                        txt_content = separator.join(unique_orgs)
                         
                         st.download_button(
-                            label="📝 Download TXT (All Organizations)",
+                            label="📝 TXT (Approved Orgs)",
                             data=txt_content,
-                            file_name=f"organizations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                            file_name=f"approved_organizations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                            mime="text/plain"
+                        )
+                
+                with col4:
+                    # Create comprehensive report with file breakdown
+                    if all_file_results:
+                        report_lines = []
+                        report_lines.append(f"ORGANIZATION EXTRACTION REPORT")
+                        report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        report_lines.append(f"Files Processed: {len(all_file_results)}")
+                        report_lines.append(f"Total Characters: {total_characters:,}")
+                        report_lines.append(f"Combined DB Matches: {len(db_matches)}")
+                        report_lines.append(f"Combined New Discoveries: {len(ner_discoveries)}")
+                        report_lines.append("")
+                        
+                        # File breakdown
+                        report_lines.append("FILE BREAKDOWN:")
+                        for filename, file_data in all_file_results.items():
+                            report_lines.append(f"\n{filename}:")
+                            report_lines.append(f"  Characters: {file_data['characters']:,}")
+                            report_lines.append(f"  DB Matches: {len(file_data['db_matches'])}")
+                            report_lines.append(f"  New Discoveries: {len(file_data['ner_discoveries'])}")
+                            report_lines.append(f"  Processing Time: {file_data['processing_time']:.2f}s")
+                        
+                        # Combined organizations
+                        report_lines.append("\n\nCOMBINED ORGANIZATIONS:")
+                        all_orgs = []
+                        for match in db_matches:
+                            all_orgs.append(match['canonical'])
+                        for discovery in ner_discoveries:
+                            all_orgs.append(discovery['text'])
+                        unique_orgs = sorted(list(set(all_orgs)))
+                        report_lines.extend([f"- {org}" for org in unique_orgs])
+                        
+                        report_content = "\n".join(report_lines)
+                        
+                        st.download_button(
+                            label="📄 Full Report",
+                            data=report_content,
+                            file_name=f"org_extraction_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                             mime="text/plain"
                         )
             
