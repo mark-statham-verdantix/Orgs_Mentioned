@@ -356,13 +356,29 @@ def main():
     st.markdown("Upload documents to automatically extract and categorize organizations")
     
     # Configuration from Streamlit secrets (fallback to environment variables)
-    postgres_config = {
-        'host': st.secrets.get("database", {}).get("POSTGRES_HOST", os.getenv('POSTGRES_HOST', 'localhost')),
-        'port': st.secrets.get("database", {}).get("POSTGRES_PORT", os.getenv('POSTGRES_PORT', '5432')),
-        'database': st.secrets.get("database", {}).get("POSTGRES_DATABASE", os.getenv('POSTGRES_DATABASE', 'postgres')),
-        'user': st.secrets.get("database", {}).get("POSTGRES_USER", os.getenv('POSTGRES_USER', 'postgres')),
-        'password': st.secrets.get("database", {}).get("POSTGRES_PASSWORD", os.getenv('POSTGRES_PASSWORD', ''))
-    }
+    try:
+        # Check if secrets are available
+        if hasattr(st.secrets, '_secrets') and "database" in st.secrets:
+            # Use Streamlit secrets
+            db_secrets = st.secrets["database"]
+            postgres_config = {
+                'host': db_secrets.get("POSTGRES_HOST", os.getenv('POSTGRES_HOST', 'localhost')),
+                'port': db_secrets.get("POSTGRES_PORT", os.getenv('POSTGRES_PORT', '5432')),
+                'database': db_secrets.get("POSTGRES_DATABASE", os.getenv('POSTGRES_DATABASE', 'postgres')),
+                'user': db_secrets.get("POSTGRES_USER", os.getenv('POSTGRES_USER', 'postgres')),
+                'password': db_secrets.get("POSTGRES_PASSWORD", os.getenv('POSTGRES_PASSWORD', ''))
+            }
+        else:
+            raise FileNotFoundError("No secrets found")
+    except (FileNotFoundError, KeyError, Exception):
+        # Fall back to environment variables if no secrets file exists
+        postgres_config = {
+            'host': os.getenv('POSTGRES_HOST', 'localhost'),
+            'port': os.getenv('POSTGRES_PORT', '5432'),
+            'database': os.getenv('POSTGRES_DATABASE', 'postgres'),
+            'user': os.getenv('POSTGRES_USER', 'postgres'),
+            'password': os.getenv('POSTGRES_PASSWORD', '')
+        }
     
     # Validate configuration
     if not all([postgres_config['host'], postgres_config['user'], postgres_config['password']]):
