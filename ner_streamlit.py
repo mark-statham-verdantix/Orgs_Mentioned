@@ -23,6 +23,7 @@ from fuzzywuzzy import fuzz, process
 from collections import defaultdict, Counter
 import warnings
 warnings.filterwarnings('ignore')
+import streamlit.components.v1 as components
 
 # Fix torch compatibility issue with Streamlit
 import os
@@ -183,17 +184,68 @@ class OrganizationExtractor:
         generic_terms = {
             'ai', 'iot', 'esg', 'api', 'cloud', 'data', 'tech', 'digital',
             'smart', 'green', 'cyber', 'auto', 'bio', 'blockchain', 'fintech',
-            'saas', 'crm', 'erp', 'hr', 'it', 'covid', 'gdpr'
+            'saas', 'crm', 'erp', 'hr', 'it', 'covid', 'gdpr',
+            # Add common words that shouldn't be organizations
+            'are', 'is', 'was', 'were', 'be', 'been', 'have', 'has', 'had',
+            'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
+            'can', 'must', 'shall', 'to', 'of', 'in', 'for', 'on', 'at', 'by',
+            'with', 'from', 'up', 'about', 'into', 'through', 'during', 'before',
+            'after', 'above', 'below', 'under', 'over', 'between', 'among',
+            'security', 'chain', 'track', 'progress', 'time', 'area', 'areas',
+            'effect', 'impact', 'data', 'information', 'report', 'reports',
+            'standard', 'standards', 'framework', 'frameworks'
         }
         return term.lower() in generic_terms
+
+    def _is_false_positive_prone(self, term: str) -> bool:
+        """Check if term is prone to false positives and needs stricter validation"""
+        # Terms that appear in many contexts but could be org names
+        false_positive_prone = {
+            'sustainability', 'sustainibility', 'innovation', 'development',
+            'technology', 'solutions', 'services', 'management', 'consulting',
+            'operations', 'strategic', 'digital', 'transformation', 'analytics',
+            'research', 'institute', 'group', 'partners', 'systems', 'network', 
+            'accountability', 'benchmark', 'framework'
+        }
+        return any(prone_term in term.lower() for prone_term in false_positive_prone)
+
+    def _requires_strong_context(self, term: str) -> bool:
+        """Check if term requires strong organizational context due to ambiguity"""
+        # Single words that are highly ambiguous
+        if ' ' not in term:
+            highly_ambiguous = {
+                'sustainability', 'innovation', 'development', 'technology',
+                'management', 'consulting', 'operations', 'research', 'analytics', 
+                'accountability','benchmark', 'framework'
+            }
+            return term.lower() in highly_ambiguous
+
+        # Multi-word phrases containing ambiguous terms
+        return self._is_false_positive_prone(term)
+
+    def _get_confidence_penalty(self, term: str) -> float:
+        """Apply confidence penalty for potentially ambiguous terms"""
+        if self._is_false_positive_prone(term):
+            # Higher penalty for single words that are very common
+            if ' ' not in term and term.lower() in ['sustainability', 'innovation', 'development', 'accountability','benchmark', 'framework']:
+                return 0.4  # 40% penalty
+            else:
+                return 0.15  # 15% penalty
+        return 0.0
     
-    def _validate_context(self, text: str, start: int, end: int) -> bool:
-        """Validate organizational context"""
+    def _validate_context(self, text: str, start: int, end: int, term: str = None) -> bool:
+        """Validate organizational context with enhanced filtering for ambiguous terms"""
+
+        # For ambiguous terms, require stronger context
+        if term and self._requires_strong_context(term):
+            return self._validate_strong_context(text, start, end)
+
+        # Standard context validation
         window = 100
         context_start = max(0, start - window)
         context_end = min(len(text), end + window)
         context = text[context_start:context_end].lower()
-        
+
         org_indicators = [
             'company', 'corporation', 'inc', 'founded', 'ceo', 'announced',
             'partnership', 'acquisition', 'investment', 'subsidiary', 'firm', 'firms',
@@ -205,9 +257,54 @@ class OrganizationExtractor:
             'board', 'executive', 'director', 'manager', 'leadership', 'staff',
             'employee', 'employees', 'workforce', 'personnel', 'professional', 'specialist'
         ]
-        
+
         return any(indicator in context for indicator in org_indicators)
-    
+
+    def _validate_strong_context(self, text: str, start: int, end: int) -> bool:
+        """Stricter context validation for ambiguous terms"""
+        window = 50  # Smaller window for stricter validation
+        context_start = max(0, start - window)
+        context_end = min(len(text), end + window)
+        context = text[context_start:context_end].lower()
+
+        # Require very explicit organizational indicators
+        strong_org_indicators = [
+            'company', 'corporation', 'inc', 'inc.', 'ltd', 'ltd.', 'llc',
+            'founded', 'ceo', 'headquarters', 'subsidiary', 'acquired',
+            'partnership with', 'announced by', 'reported by', 'according to',
+            'spokesperson for', 'representative from', 'director of'
+        ]
+
+        return any(indicator in context for indicator in strong_org_indicators)
+
+    def _find_organization_patterns(self, text: str) -> List[Dict]:
+        """Find organization patterns like 'Full Name (ACRONYM)' that NER might miss"""
+        patterns = []
+
+        # Pattern: "Full Organization Name (ACRONYM)" - improved to avoid greedy matching
+        pattern = r'(?:^|(?<=\s))([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)\s*\(([A-Z]{2,6})\)'
+
+        for match in re.finditer(pattern, text):
+            full_name = match.group(1).strip()
+            acronym = match.group(2).strip()
+            start, end = match.span()
+
+            # Check if this looks like an organization
+            if (len(full_name.split()) >= 2 and  # Multi-word
+                not any(word.lower() in ['the', 'of', 'and', 'for', 'in'] for word in full_name.split()[0:1]) and  # Doesn't start with article
+                len(acronym) >= 2):  # Valid acronym
+
+                patterns.append({
+                    'full_text': match.group(0),
+                    'full_name': full_name,
+                    'acronym': acronym,
+                    'start': start,
+                    'end': end,
+                    'confidence': 0.9
+                })
+
+        return patterns
+
     def extract_organizations(self, text: str) -> Tuple[List[Dict], List[Dict]]:
         """Extract organizations and categorize as known vs unknown"""
         
@@ -218,36 +315,109 @@ class OrganizationExtractor:
         text_lower = text.lower()
         sorted_terms = sorted(self.org_lookup.keys(), key=len, reverse=True)
         matched_positions = set()
-        
+
+        # Pre-process text to find organization patterns like "Name (ACRONYM)"
+        org_patterns = self._find_organization_patterns(text)
+
+        # Handle detected patterns first
+        for pattern in org_patterns:
+            # Check if the FULL PATTERN TEXT is in database first (highest priority)
+            full_text_lower = pattern['full_text'].lower()
+            full_name_lower = pattern['full_name'].lower()
+            acronym_lower = pattern['acronym'].lower()
+
+            if full_text_lower in self.org_lookup:
+                # Exact full text match (e.g., "Global Reporting Initiative (GRI)")
+                org_info = self.org_lookup[full_text_lower]
+                db_matches.append({
+                    'text': pattern['full_text'],
+                    'canonical': org_info['canonical'],
+                    'confidence': org_info['confidence'],
+                    'org_id': org_info['org_id'],
+                    'method': 'database'  # This is a direct database match
+                })
+                matched_positions.add((pattern['start'], pattern['end']))
+
+            elif full_name_lower in self.org_lookup:
+                # Full name match (without parentheses)
+                org_info = self.org_lookup[full_name_lower]
+                db_matches.append({
+                    'text': pattern['full_text'],
+                    'canonical': org_info['canonical'],
+                    'confidence': org_info['confidence'],
+                    'org_id': org_info['org_id'],
+                    'method': 'pattern_full'
+                })
+                matched_positions.add((pattern['start'], pattern['end']))
+
+            elif acronym_lower in self.org_lookup:
+                # Acronym match (lowest priority)
+                org_info = self.org_lookup[acronym_lower]
+                db_matches.append({
+                    'text': pattern['full_text'],
+                    'canonical': f"{pattern['full_name']} ({pattern['acronym']})",
+                    'confidence': pattern['confidence'],
+                    'org_id': org_info['org_id'],
+                    'method': 'pattern_acronym'
+                })
+                matched_positions.add((pattern['start'], pattern['end']))
+
+            else:
+                # New organization pattern
+                ner_discoveries.append({
+                    'text': pattern['full_text'],
+                    'confidence': pattern['confidence'],
+                    'method': 'pattern_new',
+                    'full_name': pattern['full_name'],
+                    'acronym': pattern['acronym']
+                })
+
         for term in sorted_terms:
-            if (len(term) >= self.min_org_length and 
+            if (len(term) >= self.min_org_length and
                 not self._is_generic_term(term)):
-                
+
                 # Require multi-word for short terms, but allow known brands from database
                 if len(term) < 8 and ' ' not in term:
                     # Use dynamically built list of short orgs from database
                     if term.lower() not in self.known_short_orgs:
                         continue
-                
-                pattern = r'\b' + re.escape(term) + r'\b'
-                
+
+                # Handle parentheses in organization names - word boundaries don't work well with them
+                if '(' in term or ')' in term:
+                    # Use lookahead/lookbehind for terms with parentheses
+                    pattern = r'(?<!\w)' + re.escape(term) + r'(?!\w)'
+                else:
+                    # Standard word boundary for terms without parentheses
+                    pattern = r'\b' + re.escape(term) + r'\b'
+
                 for match in re.finditer(pattern, text_lower):
                     start, end = match.span()
-                    
+
                     if not any(start < e and s < end for s, e in matched_positions):
                         matched_positions.add((start, end))
-                        
+
                         org_info = self.org_lookup[term]
-                        
-                        # Context validation removed - trust database matches
-                        
-                        db_matches.append({
-                            'text': text[start:end],
-                            'canonical': org_info['canonical'],
-                            'confidence': org_info['confidence'],
-                            'org_id': org_info['org_id'],
-                            'method': 'database'
-                        })
+
+                        # Apply context validation for false-positive prone terms
+                        if self._is_false_positive_prone(term):
+                            if not self._validate_context(text, start, end, term):
+                                continue  # Skip this match if context doesn't support it
+
+                        # Apply confidence penalty for ambiguous terms
+                        base_confidence = org_info['confidence']
+                        penalty = self._get_confidence_penalty(term)
+                        final_confidence = max(0.1, base_confidence - penalty)
+
+                        # Only add if confidence is above minimum threshold
+                        if final_confidence >= 0.7:  # Require reasonable confidence for DB matches
+                            db_matches.append({
+                                'text': text[start:end],
+                                'canonical': org_info['canonical'],
+                                'confidence': final_confidence,
+                                'org_id': org_info['org_id'],
+                                'method': 'database',
+                                'had_penalty': penalty > 0
+                            })
         
         # Method 2: NER for new organizations
         if self.ner_model:
@@ -272,15 +442,31 @@ class OrganizationExtractor:
                             if (len(org_text) >= self.min_org_length and
                                 pred['score'] >= self.min_confidence and
                                 not self._is_generic_term(org_text)):
-                                
+
+                                # Apply confidence penalty for ambiguous terms
+                                base_confidence = pred['score']
+                                penalty = self._get_confidence_penalty(org_text)
+                                final_confidence = max(0.1, base_confidence - penalty)
+
+                                # Skip if confidence drops too low after penalty
+                                if final_confidence < self.min_confidence:
+                                    continue
+
                                 # Check if already in database
                                 if org_text.lower() not in self.org_lookup:
-                                    # Try fuzzy matching
+                                    # Try fuzzy matching with consistent results
                                     if len(self.master_orgs_df) > 0:
                                         canonical_names = self.master_orgs_df['org_name'].tolist()
+                                        
+                                        # Sort canonical names for deterministic results
+                                        canonical_names = sorted(canonical_names)
+                                        
                                         best_match = process.extractOne(
                                             org_text, canonical_names, scorer=fuzz.ratio
                                         )
+                                        
+                                        # Store fuzzy match info for debugging
+                                        fuzzy_score = best_match[1] if best_match else 0
                                         
                                         if best_match and best_match[1] >= 85:
                                             # Close match found - add to DB matches
@@ -288,19 +474,28 @@ class OrganizationExtractor:
                                                 self.master_orgs_df['org_name'] == best_match[0]
                                             ].iloc[0]
                                             
+                                            # Apply penalty to fuzzy match confidence too
+                                            fuzzy_confidence = final_confidence * (best_match[1] / 100)
+
                                             db_matches.append({
                                                 'text': org_text,
                                                 'canonical': matched_row['org_name'],
-                                                'confidence': pred['score'] * (best_match[1] / 100),
+                                                'confidence': fuzzy_confidence,
                                                 'org_id': matched_row['org_id'],
-                                                'method': 'ner_fuzzy'
+                                                'method': 'ner_fuzzy',
+                                                'fuzzy_score': fuzzy_score,
+                                                'had_penalty': penalty > 0
                                             })
                                         else:
-                                            # New organization discovery
+                                            # New organization discovery - include fuzzy match info
                                             ner_discoveries.append({
                                                 'text': org_text,
-                                                'confidence': pred['score'],
-                                                'method': 'ner_new'
+                                                'confidence': final_confidence,
+                                                'method': 'ner_new',
+                                                'best_fuzzy_match': best_match[0] if best_match else None,
+                                                'fuzzy_score': fuzzy_score,
+                                                'had_penalty': penalty > 0,
+                                                'penalty_amount': penalty
                                             })
             
             except Exception as e:
@@ -424,15 +619,43 @@ def extract_text_from_file(uploaded_file) -> str:
         return ""
 
 
+def add_keep_alive_functionality():
+    """Add JavaScript to prevent app from sleeping"""
+    keep_alive_js = """
+    <script>
+        // Auto-refresh every 25 minutes (1500 seconds) to prevent sleeping
+        setInterval(function() {
+            // Create a small ping to keep the session alive
+            fetch(window.location.href, {
+                method: 'HEAD',
+                cache: 'no-cache'
+            }).catch(function(error) {
+                console.log('Keep-alive ping failed:', error);
+            });
+        }, 1500000); // 25 minutes
+
+        // Periodic activity simulation every 5 minutes
+        setInterval(function() {
+            // Trigger a small state change to maintain session
+            const event = new Event('streamlit:stateChanged');
+            window.dispatchEvent(event);
+        }, 300000); // 5 minutes
+    </script>
+    """
+    components.html(keep_alive_js, height=0)
+
 def main():
     """Main Streamlit application"""
-    
+
     st.set_page_config(
         page_title="Organization Extraction Tool",
         page_icon="🏢",
         layout="wide"
     )
-    
+
+    # Add keep-alive functionality
+    add_keep_alive_functionality()
+
     st.title("Organization Extraction & Database Management")
     st.markdown("Upload documents to automatically extract and categorize organizations")
     
@@ -479,6 +702,16 @@ def main():
         """)
         st.stop()
     
+    # Initialize session state for activity tracking
+    if 'last_activity' not in st.session_state:
+        st.session_state.last_activity = datetime.now()
+    if 'session_id' not in st.session_state:
+        import uuid
+        st.session_state.session_id = str(uuid.uuid4())
+
+    # Update activity timestamp on each interaction
+    st.session_state.last_activity = datetime.now()
+
     # Initialize extractor
     if 'extractor' not in st.session_state:
         with st.spinner("Initializing extraction system..."):
@@ -497,14 +730,26 @@ def main():
     # Sidebar configuration
     st.sidebar.header("Settings")
     confidence_threshold = st.sidebar.slider(
-        "Confidence Threshold", 
-        min_value=0.5, 
-        max_value=1.0, 
-        value=0.85, 
+        "Confidence Threshold",
+        min_value=0.5,
+        max_value=1.0,
+        value=0.85,
         step=0.05
     )
     extractor.min_confidence = confidence_threshold
-    
+
+    # Keep-alive status in sidebar
+    st.sidebar.header("Session Status")
+    time_since_activity = datetime.now() - st.session_state.last_activity
+    if time_since_activity.total_seconds() < 300:  # 5 minutes
+        st.sidebar.success("🟢 Active")
+    elif time_since_activity.total_seconds() < 900:  # 15 minutes
+        st.sidebar.warning("🟡 Idle")
+    else:
+        st.sidebar.error("🔴 Long Idle")
+
+    st.sidebar.caption(f"Last activity: {st.session_state.last_activity.strftime('%H:%M:%S')}")
+
     # Database statistics
     st.sidebar.metric("Organizations in Database", len(extractor.master_orgs_df))
     st.sidebar.metric("Lookup Entries", len(extractor.org_lookup))
@@ -526,6 +771,7 @@ def main():
         # Clear approval states
         st.session_state.approved_orgs = []
         st.session_state.rejected_orgs = []
+        st.session_state.manual_additions = []
         st.rerun()
     
     if uploaded_files:
@@ -691,6 +937,14 @@ def main():
                         st.write("**NER Discoveries Found:**")
                         for i, discovery in enumerate(ner_discoveries):
                             st.markdown(f"**NER Discovery {i+1}: {discovery['text']}**")
+                            
+                            # Show fuzzy match debugging info
+                            if 'fuzzy_score' in discovery:
+                                if discovery['fuzzy_score'] > 0:
+                                    st.write(f"🔍 **Fuzzy Match Debug**: Best match was '{discovery.get('best_fuzzy_match', 'Unknown')}' with score {discovery['fuzzy_score']}% (threshold: 85%)")
+                                else:
+                                    st.write(f"🔍 **Fuzzy Match Debug**: No fuzzy matches found")
+                            
                             st.json(discovery)
                             st.markdown("---")
                     if search_org:
@@ -738,6 +992,17 @@ def main():
                                                 st.success(f"✅ Passes short term filter (in known_short_orgs)")
                                         else:
                                             st.success(f"✅ Passes short term filter (long enough or multi-word)")
+
+                                        # Check false positive filtering
+                                        if extractor._is_false_positive_prone(search_lower):
+                                            st.warning(f"⚠️ Term is flagged as false-positive prone")
+                                            penalty = extractor._get_confidence_penalty(search_lower)
+                                            if penalty > 0:
+                                                st.write(f"🎯 Confidence penalty: {penalty:.2%}")
+                                            if extractor._requires_strong_context(search_lower):
+                                                st.write(f"📋 Requires strong organizational context")
+                                        else:
+                                            st.success(f"✅ Not flagged as false-positive prone")
                                             
                                     else:
                                         st.error(f"❌ Regex pattern '{pattern}' does NOT match")
@@ -804,7 +1069,20 @@ def main():
                     
                     if selected_db:
                         confirmed_orgs = db_df.iloc[selected_db]
-                        st.dataframe(confirmed_orgs[['canonical', 'confidence', 'method']], use_container_width=True)
+                        
+                        # Show fuzzy matches separately for debugging
+                        fuzzy_matches = confirmed_orgs[confirmed_orgs['method'] == 'ner_fuzzy']
+                        if len(fuzzy_matches) > 0:
+                            st.info(f"🔍 **{len(fuzzy_matches)} organizations were matched via fuzzy matching** (these were initially detected by NER but matched to existing database entries)")
+                            
+                            # Show display columns, including fuzzy_score if available
+                            display_cols = ['canonical', 'confidence', 'method']
+                            if 'fuzzy_score' in confirmed_orgs.columns:
+                                display_cols.append('fuzzy_score')
+                            
+                            st.dataframe(confirmed_orgs[display_cols], use_container_width=True)
+                        else:
+                            st.dataframe(confirmed_orgs[['canonical', 'confidence', 'method']], use_container_width=True)
                 else:
                     st.info("No organizations found in database")
                 
@@ -831,6 +1109,9 @@ def main():
                             
                             with col1:
                                 st.write(f"**{org_text}** (confidence: {discovery['confidence']:.2f})")
+                                # Show fuzzy match info if available
+                                if 'fuzzy_score' in discovery and discovery['fuzzy_score'] > 0:
+                                    st.caption(f"🔍 Closest DB match: '{discovery.get('best_fuzzy_match', 'Unknown')}' ({discovery['fuzzy_score']}%)")
                             
                             with col2:
                                 if st.button(f"Approve", key=f"approve_{i}"):
@@ -865,6 +1146,7 @@ def main():
                         with col2:
                             if st.button("📋 Add to Extracted List"):
                                 # Add approved orgs to db_matches for export
+                                added_count = 0
                                 for approved_org in st.session_state.approved_orgs:
                                     db_matches.append({
                                         'text': approved_org,
@@ -873,14 +1155,35 @@ def main():
                                         'org_id': None,
                                         'method': 'manual_approval'
                                     })
-                                st.success(f"Added {len(st.session_state.approved_orgs)} organizations to extracted list!")
+                                    added_count += 1
+                                
+                                # Add manual additions to db_matches for export
+                                if 'manual_additions' in st.session_state:
+                                    for manual_org in st.session_state.manual_additions:
+                                        db_matches.append({
+                                            'text': manual_org,
+                                            'canonical': manual_org,
+                                            'confidence': 0.90,
+                                            'org_id': None,
+                                            'method': 'manual_addition'
+                                        })
+                                        added_count += 1
+                                
+                                st.success(f"Added {added_count} organizations to extracted list!")
                                 st.session_state.approved_orgs = []
+                                if 'manual_additions' in st.session_state:
+                                    st.session_state.manual_additions = []
                                 st.rerun()
                 else:
                     st.info("No new organizations discovered")
                 
                 # Manual Addition Section
                 st.subheader("➕ Manual Organization Addition")
+                
+                # Initialize manual additions in session state
+                if 'manual_additions' not in st.session_state:
+                    st.session_state.manual_additions = []
+                
                 with st.form("manual_addition"):
                     new_org_name = st.text_input(
                         "Organization Name",
@@ -890,11 +1193,31 @@ def main():
                     submitted = st.form_submit_button("Add to Pending List")
                     
                     if submitted and new_org_name:
+                        new_org_name = new_org_name.strip()
                         if new_org_name.lower() in extractor.org_lookup:
                             st.warning(f"'{new_org_name}' already exists in database")
+                        elif new_org_name in st.session_state.manual_additions:
+                            st.warning(f"'{new_org_name}' already added to pending list")
                         else:
+                            st.session_state.manual_additions.append(new_org_name)
                             st.success(f"Added '{new_org_name}' to pending additions")
-                            # Here you would add to pending database additions
+                            st.rerun()
+                
+                # Display current manual additions
+                if st.session_state.manual_additions:
+                    st.success(f"📋 **Manually Added Organizations ({len(st.session_state.manual_additions)}):**")
+                    for i, manual_org in enumerate(st.session_state.manual_additions):
+                        col1, col2 = st.columns([4, 1])
+                        with col1:
+                            st.write(f"• {manual_org}")
+                        with col2:
+                            if st.button("❌", key=f"remove_manual_{i}", help="Remove from list"):
+                                st.session_state.manual_additions.remove(manual_org)
+                                st.rerun()
+                    
+                    if st.button("🔄 Clear All Manual Additions"):
+                        st.session_state.manual_additions = []
+                        st.rerun()
                 
                 # Export Results
                 st.subheader("📥 Export Combined Results")
@@ -950,8 +1273,8 @@ def main():
                         )
                 
                 with col3:
-                    if db_matches or (st.session_state.get('approved_orgs', [])):
-                        # Create combined organization list for .txt export (DB matches + approved orgs only)
+                    if db_matches or (st.session_state.get('approved_orgs', [])) or (st.session_state.get('manual_additions', [])):
+                        # Create combined organization list for .txt export (DB matches + approved orgs + manual additions)
                         all_orgs = []
                         
                         # Add database matches
@@ -962,11 +1285,18 @@ def main():
                         if 'approved_orgs' in st.session_state:
                             all_orgs.extend(st.session_state.approved_orgs)
                         
+                        # Add manual additions
+                        if 'manual_additions' in st.session_state:
+                            all_orgs.extend(st.session_state.manual_additions)
+                        
                         # Remove duplicates and sort
                         unique_orgs = sorted(list(set(all_orgs)))
                         
                         # Show what will be exported
-                        st.write(f"**Export will include:** {len([m['canonical'] for m in db_matches])} DB matches + {len(st.session_state.get('approved_orgs', []))} approved orgs = {len(unique_orgs)} total")
+                        db_count = len([m['canonical'] for m in db_matches])
+                        approved_count = len(st.session_state.get('approved_orgs', []))
+                        manual_count = len(st.session_state.get('manual_additions', []))
+                        st.write(f"**Export will include:** {db_count} DB matches + {approved_count} approved orgs + {manual_count} manual additions = {len(unique_orgs)} total")
                         
                         # Separator selection
                         separator = st.radio(
@@ -1015,8 +1345,16 @@ def main():
                             all_orgs.append(match['canonical'])
                         for discovery in ner_discoveries:
                             all_orgs.append(discovery['text'])
+                        if 'manual_additions' in st.session_state:
+                            all_orgs.extend(st.session_state.manual_additions)
                         unique_orgs = sorted(list(set(all_orgs)))
                         report_lines.extend([f"- {org}" for org in unique_orgs])
+                        
+                        # Manual additions section
+                        if 'manual_additions' in st.session_state and st.session_state.manual_additions:
+                            report_lines.append(f"\n\nMANUAL ADDITIONS ({len(st.session_state.manual_additions)}):")
+                            for manual_org in st.session_state.manual_additions:
+                                report_lines.append(f"- {manual_org}")
                         
                         report_content = "\n".join(report_lines)
                         
