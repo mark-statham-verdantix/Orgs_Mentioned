@@ -209,7 +209,10 @@ class OrganizationExtractor:
             'decisions', 'interface', 'frontier','overview', 'seamless','succeed',
             'access', 'deploy', 'engage', 'fabric', 'figure', 'switch', 'aware', 
             'focus', 'given', 'pilot', 'trend', 'best', 'code', 'edge', 'here', 'next', 
-            'true', 'well', 'box', 'vector', 'group', 'space', 'partners'
+            'true', 'well', 'box', 'vector', 'group', 'space', 'partners', 'consultants', 
+            'ecosystem', 'reliance', 'current', 'nature', 'boots', 'first', 'reach', 'shape', 
+            'near', 'peak', 'view', 'era', 'gap', 'one', 'Australia', 'capital', 'London', 'core', 
+            'five', 'post', 'slam', 'big', 'cog', 'its', 'net', 'PLC', 'RFP'
         }
         return any(prone_term in term.lower() for prone_term in false_positive_prone)
 
@@ -224,7 +227,10 @@ class OrganizationExtractor:
                 'decisions', 'interface', 'frontier', 'overview', 'seamless','succeed',
                 'access','deploy', 'engage', 'fabric', 'figure', 'switch', 'aware', 
                 'focus', 'given', 'pilot', 'trend', 'best', 'code', 'edge', 'here', 'next', 
-                'true', 'well', 'box', 'vector', 'group', 'space', 'partners'
+                'true', 'well', 'box', 'vector', 'group', 'space', 'partners', 'consultants', 
+                'ecosystem', 'reliance', 'current', 'nature', 'boots', 'first', 'reach', 'shape', 
+                'near', 'peak', 'view', 'era', 'gap', 'one', 'Australia', 'capital', 'London', 'core', 
+                'five', 'post', 'slam', 'big', 'cog', 'its', 'net', 'PLC', 'RFP'
             }
             return term.lower() in highly_ambiguous
 
@@ -239,7 +245,9 @@ class OrganizationExtractor:
                                                     'decisions', 'interface', 'frontier', 'overview', 'seamless','succeed','access','deploy', 'engage', 'fabric',
                                                     'figure', 'switch', 'aware', 
                                                     'focus', 'given', 'pilot', 'trend', 'best', 'code', 'edge', 'here', 'next', 
-                                                     'true', 'well', 'box', 'vector', 'group', 'space', 'partners']:
+                                                     'true', 'well', 'box', 'vector', 'group', 'space', 'partners', 'consultants', 'ecosystem', 'reliance', 'current',
+                                                    'nature', 'boots', 'first', 'reach', 'shape', 'near', 'peak', 'view', 'era', 'gap', 'one', 'Australia', 'capital',
+                                                      'London', 'core', 'five', 'post', 'slam', 'big', 'cog', 'its', 'net', 'PLC', 'RFP']:
                 return 0.4  # 40% penalty
             else:
                 return 0.15  # 15% penalty
