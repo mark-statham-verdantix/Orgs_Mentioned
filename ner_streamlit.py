@@ -205,7 +205,11 @@ class OrganizationExtractor:
             'technology', 'solutions', 'services', 'management', 'consulting',
             'operations', 'strategic', 'digital', 'transformation', 'analytics',
             'research', 'institute', 'group', 'partners', 'systems', 'network', 
-            'accountability', 'benchmark', 'framework'
+            'accountability', 'benchmark', 'framework', 'automation', 'measurable',
+            'decisions', 'interface', 'frontier','overview', 'seamless','succeed',
+            'access', 'deploy', 'engage', 'fabric', 'figure', 'switch', 'aware', 
+            'focus', 'given', 'pilot', 'trend', 'best', 'code', 'edge', 'here', 'next', 
+            'true', 'well', 'box', 'vector', 'group', 'space', 'partners'
         }
         return any(prone_term in term.lower() for prone_term in false_positive_prone)
 
@@ -216,7 +220,11 @@ class OrganizationExtractor:
             highly_ambiguous = {
                 'sustainability', 'innovation', 'development', 'technology',
                 'management', 'consulting', 'operations', 'research', 'analytics', 
-                'accountability','benchmark', 'framework'
+                'accountability','benchmark', 'framework', 'automation', 'measurable',
+                'decisions', 'interface', 'frontier', 'overview', 'seamless','succeed',
+                'access','deploy', 'engage', 'fabric', 'figure', 'switch', 'aware', 
+                'focus', 'given', 'pilot', 'trend', 'best', 'code', 'edge', 'here', 'next', 
+                'true', 'well', 'box', 'vector', 'group', 'space', 'partners'
             }
             return term.lower() in highly_ambiguous
 
@@ -227,7 +235,11 @@ class OrganizationExtractor:
         """Apply confidence penalty for potentially ambiguous terms"""
         if self._is_false_positive_prone(term):
             # Higher penalty for single words that are very common
-            if ' ' not in term and term.lower() in ['sustainability', 'innovation', 'development', 'accountability','benchmark', 'framework']:
+            if ' ' not in term and term.lower() in ['sustainability', 'innovation', 'development', 'accountability','benchmark', 'framework', 'automation', 'measurable',
+                                                    'decisions', 'interface', 'frontier', 'overview', 'seamless','succeed','access','deploy', 'engage', 'fabric',
+                                                    'figure', 'switch', 'aware', 
+                                                    'focus', 'given', 'pilot', 'trend', 'best', 'code', 'edge', 'here', 'next', 
+                                                     'true', 'well', 'box', 'vector', 'group', 'space', 'partners']:
                 return 0.4  # 40% penalty
             else:
                 return 0.15  # 15% penalty
