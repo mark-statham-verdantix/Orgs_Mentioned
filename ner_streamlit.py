@@ -792,6 +792,7 @@ def main():
         st.session_state.approved_orgs = []
         st.session_state.rejected_orgs = []
         st.session_state.manual_additions = []
+        st.session_state.excluded_db_orgs = []
         st.rerun()
     
     if uploaded_files:
@@ -1076,33 +1077,57 @@ def main():
                 # Database Matches Tab
                 st.subheader("✅ Organizations Found in Database")
                 if db_matches:
+                    # Initialize excluded organizations session state
+                    if 'excluded_db_orgs' not in st.session_state:
+                        st.session_state.excluded_db_orgs = []
+
+                    # Create dataframe for table display
                     db_df = pd.DataFrame(db_matches)
                     db_df['confidence'] = db_df['confidence'].round(3)
-                    
-                    # Allow filtering
-                    selected_db = st.multiselect(
-                        "Select confirmed organizations:",
-                        options=range(len(db_df)),
-                        default=list(range(len(db_df))),
-                        format_func=lambda x: f"{db_df.iloc[x]['canonical']} ({db_df.iloc[x]['confidence']:.2f})"
-                    )
-                    
-                    if selected_db:
-                        confirmed_orgs = db_df.iloc[selected_db]
-                        
-                        # Show fuzzy matches separately for debugging
-                        fuzzy_matches = confirmed_orgs[confirmed_orgs['method'] == 'ner_fuzzy']
-                        if len(fuzzy_matches) > 0:
-                            st.info(f"🔍 **{len(fuzzy_matches)} organizations were matched via fuzzy matching** (these were initially detected by NER but matched to existing database entries)")
-                            
-                            # Show display columns, including fuzzy_score if available
-                            display_cols = ['canonical', 'confidence', 'method']
-                            if 'fuzzy_score' in confirmed_orgs.columns:
-                                display_cols.append('fuzzy_score')
-                            
-                            st.dataframe(confirmed_orgs[display_cols], use_container_width=True)
-                        else:
-                            st.dataframe(confirmed_orgs[['canonical', 'confidence', 'method']], use_container_width=True)
+
+                    # Add exclude buttons in table format
+                    st.markdown("**Organizations found in database** (click ❌ to exclude from export):")
+
+                    # Display in table format with exclude buttons
+                    for i, match in enumerate(db_matches):
+                        canonical_name = match['canonical']
+
+                        # Skip if already excluded
+                        if canonical_name in st.session_state.excluded_db_orgs:
+                            continue
+
+                        col1, col2, col3, col4 = st.columns([5, 1.5, 1.5, 0.5])
+                        with col1:
+                            st.write(f"**{canonical_name}**")
+                        with col2:
+                            st.write(f"{match['confidence']:.2f}")
+                        with col3:
+                            st.write(f"{match['method']}")
+                        with col4:
+                            if st.button("❌", key=f"exclude_db_{i}", help="Exclude from export"):
+                                st.session_state.excluded_db_orgs.append(canonical_name)
+                                st.rerun()
+
+                    # Show excluded organizations in compact format
+                    if st.session_state.excluded_db_orgs:
+                        with st.expander(f"❌ Excluded from Export ({len(st.session_state.excluded_db_orgs)})", expanded=False):
+                            for j, excluded_org in enumerate(st.session_state.excluded_db_orgs):
+                                col1, col2 = st.columns([9, 1])
+                                with col1:
+                                    st.write(f"• {excluded_org}")
+                                with col2:
+                                    if st.button("↩️", key=f"restore_db_{j}", help="Restore to export list"):
+                                        st.session_state.excluded_db_orgs.remove(excluded_org)
+                                        st.rerun()
+
+                            if st.button("🔄 Restore All Excluded"):
+                                st.session_state.excluded_db_orgs = []
+                                st.rerun()
+
+                    # Show summary
+                    included_count = len([m for m in db_matches if m['canonical'] not in st.session_state.excluded_db_orgs])
+                    st.success(f"**{included_count} organizations will be included in export**")
+
                 else:
                     st.info("No organizations found in database")
                 
@@ -1116,6 +1141,8 @@ def main():
                         st.session_state.approved_orgs = []
                     if 'rejected_orgs' not in st.session_state:
                         st.session_state.rejected_orgs = []
+                    if 'excluded_db_orgs' not in st.session_state:
+                        st.session_state.excluded_db_orgs = []
                     
                     for i, discovery in enumerate(ner_discoveries):
                         org_text = discovery['text']
@@ -1246,27 +1273,34 @@ def main():
                 
                 with col1:
                     if db_matches:
-                        # Add source file information to CSV export
-                        enriched_db_matches = []
-                        for match in db_matches:
-                            # Find which file(s) this match came from
-                            source_files = []
-                            for filename, file_data in all_file_results.items():
-                                for file_match in file_data['db_matches']:
-                                    if file_match['canonical'] == match['canonical']:
-                                        source_files.append(filename)
-                            
-                            match_with_source = match.copy()
-                            match_with_source['source_files'] = '; '.join(set(source_files))
-                            enriched_db_matches.append(match_with_source)
-                        
-                        csv_data = pd.DataFrame(enriched_db_matches).to_csv(index=False)
-                        st.download_button(
-                            label="📊 CSV (DB Matches)",
-                            data=csv_data,
-                            file_name=f"db_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv"
-                        )
+                        # Filter out excluded organizations from export
+                        excluded_orgs = st.session_state.get('excluded_db_orgs', [])
+                        filtered_db_matches = [m for m in db_matches if m['canonical'] not in excluded_orgs]
+
+                        if filtered_db_matches:
+                            # Add source file information to CSV export
+                            enriched_db_matches = []
+                            for match in filtered_db_matches:
+                                # Find which file(s) this match came from
+                                source_files = []
+                                for filename, file_data in all_file_results.items():
+                                    for file_match in file_data['db_matches']:
+                                        if file_match['canonical'] == match['canonical']:
+                                            source_files.append(filename)
+
+                                match_with_source = match.copy()
+                                match_with_source['source_files'] = '; '.join(set(source_files))
+                                enriched_db_matches.append(match_with_source)
+
+                            csv_data = pd.DataFrame(enriched_db_matches).to_csv(index=False)
+                            st.download_button(
+                                label="📊 CSV (DB Matches)",
+                                data=csv_data,
+                                file_name=f"db_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                mime="text/csv"
+                            )
+                        else:
+                            st.info("No database matches to export (all excluded)")
                 
                 with col2:
                     if ner_discoveries:
@@ -1293,30 +1327,40 @@ def main():
                         )
                 
                 with col3:
-                    if db_matches or (st.session_state.get('approved_orgs', [])) or (st.session_state.get('manual_additions', [])):
-                        # Create combined organization list for .txt export (DB matches + approved orgs + manual additions)
+                    # Filter database matches for TXT export
+                    excluded_orgs = st.session_state.get('excluded_db_orgs', [])
+                    filtered_db_matches = [m for m in db_matches if m['canonical'] not in excluded_orgs]
+
+                    if filtered_db_matches or (st.session_state.get('approved_orgs', [])) or (st.session_state.get('manual_additions', [])):
+                        # Create combined organization list for .txt export (filtered DB matches + approved orgs + manual additions)
                         all_orgs = []
-                        
-                        # Add database matches
-                        for match in db_matches:
+
+                        # Add filtered database matches (excluding user-excluded ones)
+                        for match in filtered_db_matches:
                             all_orgs.append(match['canonical'])
-                        
+
                         # Add approved organizations from review process
                         if 'approved_orgs' in st.session_state:
                             all_orgs.extend(st.session_state.approved_orgs)
-                        
+
                         # Add manual additions
                         if 'manual_additions' in st.session_state:
                             all_orgs.extend(st.session_state.manual_additions)
-                        
+
                         # Remove duplicates and sort
                         unique_orgs = sorted(list(set(all_orgs)))
-                        
+
                         # Show what will be exported
-                        db_count = len([m['canonical'] for m in db_matches])
+                        db_count = len(filtered_db_matches)
+                        excluded_count = len(excluded_orgs)
                         approved_count = len(st.session_state.get('approved_orgs', []))
                         manual_count = len(st.session_state.get('manual_additions', []))
-                        st.write(f"**Export will include:** {db_count} DB matches + {approved_count} approved orgs + {manual_count} manual additions = {len(unique_orgs)} total")
+
+                        export_summary = f"**Export will include:** {db_count} DB matches"
+                        if excluded_count > 0:
+                            export_summary += f" ({excluded_count} excluded)"
+                        export_summary += f" + {approved_count} approved orgs + {manual_count} manual additions = {len(unique_orgs)} total"
+                        st.write(export_summary)
                         
                         # Separator selection
                         separator = st.radio(
@@ -1358,11 +1402,16 @@ def main():
                             report_lines.append(f"  New Discoveries: {len(file_data['ner_discoveries'])}")
                             report_lines.append(f"  Processing Time: {file_data['processing_time']:.2f}s")
                         
-                        # Combined organizations
+                        # Combined organizations (filtered)
                         report_lines.append("\n\nCOMBINED ORGANIZATIONS:")
                         all_orgs = []
+
+                        # Add filtered database matches (excluding user-excluded ones)
+                        excluded_orgs = st.session_state.get('excluded_db_orgs', [])
                         for match in db_matches:
-                            all_orgs.append(match['canonical'])
+                            if match['canonical'] not in excluded_orgs:
+                                all_orgs.append(match['canonical'])
+
                         for discovery in ner_discoveries:
                             all_orgs.append(discovery['text'])
                         if 'manual_additions' in st.session_state:
